@@ -1,0 +1,7 @@
+# 本地 / 误提交
+.DS_Store
+.history/
+
+# 配置与凭据（仅存于 ~/.config/mihomo，勿拷贝进本仓库）
+*.yaml
+*.yml
