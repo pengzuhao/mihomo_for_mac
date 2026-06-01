@@ -160,41 +160,6 @@ local function startHotkeySyncTimer()
   hotkeySyncTimer = hs.timer.doEvery(8, updateConfigHotkey)
 end
 
-local function pickAlertMsg(msg)
-  if not msg or msg == "" then
-    return msg
-  end
-  local lastOk = nil
-  for line in msg:gmatch("[^\r\n]+") do
-    if line:find("已切换") or line:find("已切至") or line:find("已开启") or line:find("已设为当前") then
-      lastOk = line
-    end
-  end
-  if lastOk then
-    return lastOk
-  end
-  if msg:find("已停止") and msg:find("已启动") then
-    return "配置已切换（已重启核心）"
-  end
-  return msg:match("[^\r\n]+") or msg
-end
-
-local function alertUser(msg)
-  if not msg or msg == "" then
-    return
-  end
-  local text = pickAlertMsg(msg)
-  -- menubar 更新同一时刻弹窗易被吞；略延时。勿用 pcall(hs.alert.show,...) 会错传 self
-  hs.timer.doAfter(0.12, function()
-    local ok, err = pcall(function()
-      hs.alert.show(text, 2)
-    end)
-    if not ok then
-      log("alertUser error: " .. tostring(err))
-    end
-  end)
-end
-
 local function asStdout(s)
   if s == nil then
     return ""
@@ -287,6 +252,49 @@ local function yamlStem(fname)
   local s = tostring(fname)
   s = s:gsub("%.yaml$", ""):gsub("%.YAML$", "")
   return s
+end
+
+local function pickAlertMsg(msg)
+  if not msg or msg == "" then
+    return msg
+  end
+  local lastOk = nil
+  for line in msg:gmatch("[^\r\n]+") do
+    if line:find("已切换") or line:find("已切至") or line:find("已开启") or line:find("已设为当前") or line:find("系统代理") then
+      lastOk = line
+    end
+  end
+  if lastOk then
+    return lastOk
+  end
+  if msg:find("mihomo 已启动") or msg:find("配置:") then
+    local cfgLine = msg:match("配置:%s*([^\r\n]+)") or msg:match("配置: ([^\r\n]+)")
+    if cfgLine and cfgLine ~= "" then
+      if msg:find("系统代理") then
+        return "已开启（系统代理 7890）· " .. yamlStem(cfgLine)
+      end
+      return "已开启 " .. tunLabel(yamlStem(cfgLine))
+    end
+  end
+  if msg:find("已停止") and msg:find("已启动") then
+    return "配置已切换（已重启核心）"
+  end
+  return msg:match("[^\r\n]+") or msg
+end
+
+local function alertUser(msg)
+  if not msg or msg == "" then
+    return
+  end
+  local text = pickAlertMsg(msg)
+  hs.timer.doAfter(0.12, function()
+    local ok, err = pcall(function()
+      hs.alert.show(text, 2)
+    end)
+    if not ok then
+      log("alertUser error: " .. tostring(err))
+    end
+  end)
 end
 
 -- hs.task 默认 -lc 可能无 HOME/PATH；与 status() 一致用 quoteSh，避免个别版本 hs.quote 行为异常
@@ -444,16 +452,10 @@ end
 local function menuForState(raw)
   local mode, activeCfg = parseStatus(raw)
   local markOff = (mode == "off") and "✓ " or ""
-  local prefWhenOff = peekActiveConfigBasename()
   local items = {}
   for _, fname in ipairs(enumerateYamlConfigs()) do
     local stem = yamlStem(fname)
-    local isChosen = false
-    if mode == "off" then
-      isChosen = (prefWhenOff ~= "" and fname == prefWhenOff)
-    else
-      isChosen = activeCfg == stem
-    end
+    local isChosen = (mode ~= "off") and (activeCfg == stem)
     local mark = isChosen and "✓ " or ""
     local capFname = fname
     table.insert(items, {
@@ -727,8 +729,25 @@ local function runControlDispatchCompletion(cmd, after, quiet, quietOn, feedSnap
     end
     updateConfigHotkey()
   elseif after then
-    if msg ~= "" and not (quiet and cmd == "off") and not (cmd == "set-config" and setConfigChainOn) then
-      alertUser(msg)
+    if cmd == "on" then
+      if not openUserAlerted[feedSnap] then
+        openUserAlerted[feedSnap] = true
+        local alert = pickAlertMsg(msg)
+        if alert and alert ~= "" and not alert:find("^mihomo 已启动") then
+          alertUser(alert)
+        else
+          local stem = yamlStem(peekActiveConfigBasename())
+          if stem ~= "" then
+            if msg:find("系统代理") then
+              alertUser("已开启（系统代理 7890）· " .. stem)
+            else
+              alertUser("已开启 " .. tunLabel(stem))
+            end
+          else
+            alertUser("已开启 mihomo")
+          end
+        end
+      end
     elseif cmd == "switch-config" then
       local st = status()
       local _, stem = parseStatus(st)
@@ -737,8 +756,8 @@ local function runControlDispatchCompletion(cmd, after, quiet, quietOn, feedSnap
       else
         alertUser("配置已切换")
       end
-    elseif cmd == "on" then
-      alertUser("已开启 mihomo")
+    elseif msg ~= "" and not (quiet and cmd == "off") and not (cmd == "set-config" and setConfigChainOn) then
+      alertUser(msg)
     end
     after()
     updateConfigHotkey()
@@ -830,7 +849,7 @@ runControl = function(cmd, after, optimisticState, gen, quiet, extraYaml)
   if optimisticState then
     applyOptimistic(optimisticState)
   end
-  if quietOn then
+  if quietOn and not after then
     scheduleQuietOnAlert(feedSnap)
   end
   log("runControl sync exec cmd=" .. cmd)

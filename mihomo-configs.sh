@@ -139,20 +139,43 @@ cfg_switchable() {
   [[ "$(cfg_count)" -ge 2 ]]
 }
 
+# yaml 顶层 tun.enable: true（default-ss-s 等）；启动后核心会自行挂 TUN，不必等 9090 再 PATCH
+cfg_tun_enabled_in_file() {
+  local cfg="$1"
+  local f="${DATA_DIR}/${cfg}"
+  [[ -f "${f}" ]] || return 1
+  awk '
+    /^tun:/ { in_tun = 1; next }
+    in_tun && /^[^[:space:]#]/ { in_tun = 0 }
+    in_tun && /^[[:space:]]+enable:[[:space:]]*true([[:space:]]|$|#)/ { found = 1 }
+    END { exit !found }
+  ' "${f}"
+}
+
 # 真·mihomo 核心：与 startup-mihomo.sh 一致，命令行含「二进制路径 +  -f  +  -d $DATA_DIR」。
 # 1) pgrep -f 路径会误匹配 zsh/Cursor 里出现同一路径的进程。
 # 2) ps 默认会截断长 args，必须 axww，否则刚 nohup 起的进程常被漏检 → 脚本报启动失败但 UI 仍乐观。
 is_mihomo_core_running() {
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] && return 0
+  done < <(mihomo_core_pids)
+  return 1
+}
+
+# 真·mihomo 核心 pid 列表（精确匹配 -f / -d，避免 killall 误伤）
+mihomo_core_pids() {
   local bin="${DATA_DIR}/mihomo"
   local dd="${DATA_DIR}"
-  ps axww -o args= 2>/dev/null | awk -v b="$bin" -v d="$dd" '
-    BEGIN { found=0 }
-    index($0, b) && index($0, " -f ") && index($0, " -d ") && index($0, d) { found=1 }
-    END { exit !found }
+  ps axww -o pid=,args= 2>/dev/null | awk -v b="$bin" -v d="$dd" '
+    index($0, b) && index($0, " -f ") && index($0, " -d ") && index($0, d) {
+      sub(/^[[:space:]]+/, "", $1)
+      print $1
+    }
   '
 }
 
-# 从 ps 读出当前核心 -f 指向的 yaml 基名（热切换后命令行不变，仍以进程为准鉴权）
+# 从 ps 读出当前核心 -f 指向的 yaml 文件名
 cfg_running() {
   local bin="${DATA_DIR}/mihomo"
   local dd="${DATA_DIR}"

@@ -107,25 +107,61 @@ tun_label() {
   echo "TUN-$(cfg_stem "$(cfg_active)")"
 }
 
+# load：先用运行中进程 secret 鉴权 PUT；tun：先用目标配置 secret（热切换后内存已是新配置）
+api_secrets_collect() {
+  local mode="$1"
+  local cfg="$2"
+  local running_cfg="${3:-}"
+  local sec_cfg sec_run seen=""
+  sec_cfg=$(secret_for "${cfg}")
+  sec_run=""
+  if [[ -n "${running_cfg}" ]]; then
+    sec_run=$(secret_for "${running_cfg}")
+  fi
+  if [[ "${mode}" == "load" ]]; then
+    if [[ -n "${running_cfg}" ]]; then
+      [[ "${sec_run}" != "${seen}" ]] && echo "${sec_run}" && seen="${sec_run}"
+    fi
+    [[ "${sec_cfg}" != "${seen}" ]] && echo "${sec_cfg}"
+  else
+    [[ "${sec_cfg}" != "${seen}" ]] && echo "${sec_cfg}" && seen="${sec_cfg}"
+    if [[ -n "${running_cfg}" && "${running_cfg}" != "${cfg}" ]]; then
+      [[ "${sec_run}" != "${seen}" ]] && echo "${sec_run}"
+    fi
+  fi
+}
+
+api_tun_is_enabled() {
+  local cfg="$1"
+  local running_cfg="${2:-}"
+  local secret body
+  while IFS= read -r secret || [[ -n "${secret:-}" ]]; do
+    [[ -z "${secret}" ]] && continue
+    body=$(_curl_with_api_auth "${secret}" -m 2 "${API}/configs" 2>/dev/null) || continue
+    if echo "${body}" | grep -qE '"tun"[[:space:]]*:[[:space:]]*\{[^}]*"enable"[[:space:]]*:[[:space:]]*true'; then
+      return 0
+    fi
+  done < <(api_secrets_collect tun "${cfg}" "${running_cfg}")
+  return 1
+}
+
 api_tun_enable() {
   local cfg="${1:-$(cfg_active)}"
   local running_cfg="${2:-}"
-  local secret code seen=""
-  local -a secrets=()
-  if [[ -n "${running_cfg}" ]]; then
-    secrets+=("$(secret_for "${running_cfg}")")
+  if api_tun_is_enabled "${cfg}" "${running_cfg}"; then
+    return 0
   fi
-  secrets+=("$(secret_for "${cfg}")")
-  for secret in "${secrets[@]}"; do
-    [[ "${secret}" == "${seen}" ]] && continue
-    seen="${secret}"
-    if _curl_with_api_auth "${secret}" -m 2 -X PATCH \
+  local secret code
+  while IFS= read -r secret || [[ -n "${secret:-}" ]]; do
+    [[ -z "${secret}" ]] && continue
+    code=$(_curl_with_api_auth "${secret}" -m 3 -o /dev/null -w '%{http_code}' -X PATCH \
       -H "Content-Type: application/json" \
       -d '{"tun":{"enable":true,"stack":"gvisor","auto-route":true,"auto-detect-interface":true,"dns-hijack":["any:53"]}}' \
-      "${API}/configs" >/dev/null 2>&1; then
+      "${API}/configs" 2>/dev/null) || continue
+    if [[ "${code}" == "200" || "${code}" == "204" ]]; then
       return 0
     fi
-  done
+  done < <(api_secrets_collect tun "${cfg}" "${running_cfg}")
   return 1
 }
 
@@ -133,16 +169,10 @@ load_config_api() {
   local cfg="$1"
   local running_cfg="${2:-}"
   local path="${DATA_DIR}/${cfg}"
-  local secret code seen=""
-  local -a secrets=()
+  local secret code
   local timeout="${MIHOMO_LOAD_CFG_TIMEOUT:-30}"
-  if [[ -n "${running_cfg}" ]]; then
-    secrets+=("$(secret_for "${running_cfg}")")
-  fi
-  secrets+=("$(secret_for "${cfg}")")
-  for secret in "${secrets[@]}"; do
-    [[ "${secret}" == "${seen}" ]] && continue
-    seen="${secret}"
+  while IFS= read -r secret || [[ -n "${secret:-}" ]]; do
+    [[ -z "${secret}" ]] && continue
     code=$(_curl_with_api_auth "${secret}" -m "${timeout}" -o /dev/null -w '%{http_code}' -X PUT \
       -H "Content-Type: application/json" \
       -d "{\"path\":\"${path}\"}" \
@@ -151,7 +181,7 @@ load_config_api() {
       cfg_set_active "${cfg}"
       return 0
     fi
-  done
+  done < <(api_secrets_collect load "${cfg}" "${running_cfg}")
   return 1
 }
 
@@ -178,8 +208,6 @@ force_stop() {
 }
 
 cmd_on() {
-  # 一律先走 startup-mihomo：内部用面板可达性识破「进程检测误报 / 占位无监听」，
-  # 避免出现「误以为已在运行 → 跳过 nohup → 无端口但 UI 仍乐观」的现象。
   "${SCRIPT_DIR}/startup-mihomo.sh"
   wait_running || {
     echo "启动失败" >&2
@@ -190,7 +218,23 @@ cmd_on() {
     proxy_off || true
   fi
 
-  if api_tun_enable; then
+  local cfg_on
+  cfg_on=$(cfg_active)
+
+  # 配置已写 tun.enable: true 时，核心启动即挂 TUN；勿在 9090 未就绪时 PATCH/误关 TUN
+  if cfg_tun_enabled_in_file "${cfg_on}"; then
+    write_state "$(state_mode tun)"
+    echo "已开启 $(tun_label)"
+    return 0
+  fi
+
+  if api_tun_enable "${cfg_on}"; then
+    write_state "$(state_mode tun)"
+    echo "已开启 $(tun_label)"
+    return 0
+  fi
+
+  if api_tun_is_enabled "${cfg_on}"; then
     write_state "$(state_mode tun)"
     echo "已开启 $(tun_label)"
     return 0
@@ -295,6 +339,11 @@ cmd_set_config() {
   fi
 
   if ! api_tun_enable "${name}" "${running_cfg}"; then
+    if api_tun_is_enabled "${name}" "${running_cfg}"; then
+      write_state "$(state_mode tun)"
+      echo "已切换至 $(cfg_stem "${name}")"
+      return 0
+    fi
     local secret
     secret=$(secret_for "${name}")
     _curl_with_api_auth "${secret}" -m 2 -X PATCH \
