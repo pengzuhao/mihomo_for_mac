@@ -56,4 +56,6 @@ if is_mihomo_core_running; then
   exit 1
 fi
 
-echo "mihomo 已停止"
+if [[ -z "${MIHOMO_SILENT_SHUTDOWN:-}" ]]; then
+  echo "mihomo 已停止"
+fi

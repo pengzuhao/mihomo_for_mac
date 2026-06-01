@@ -26,7 +26,7 @@ CONFIG_NAME=$(cfg_active)
 CONFIG="${DATA_DIR}/${CONFIG_NAME}"
 
 if [[ "${1:-}" == "restart" ]]; then
-  "${SCRIPT_DIR}/shutdown-mihomo.sh" || true
+  MIHOMO_SILENT_SHUTDOWN=1 "${SCRIPT_DIR}/shutdown-mihomo.sh" || true
   for ((i = 0; i < 25; i++)); do
     is_mihomo_core_running || break
     sleep "${POLL}"
@@ -43,7 +43,7 @@ if is_mihomo_core_running; then
     sleep 0.15
   done
   echo "检测到占位进程但面板不可达 (${API_ROOT})，尝试关闭后重启…" >&2
-  "${SCRIPT_DIR}/shutdown-mihomo.sh" || true
+  MIHOMO_SILENT_SHUTDOWN=1 "${SCRIPT_DIR}/shutdown-mihomo.sh" || true
   for ((i = 0; i < 25; i++)); do
     is_mihomo_core_running || break
     sleep "${POLL}"

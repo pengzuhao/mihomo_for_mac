@@ -56,9 +56,9 @@ is_running() {
 
 wait_running() {
   local i
-  for ((i = 0; i < 20; i++)); do
+  for ((i = 0; i < 40; i++)); do
     is_running && return 0
-    sleep 0.1
+    sleep 0.15
   done
   return 1
 }
@@ -109,27 +109,50 @@ tun_label() {
 
 api_tun_enable() {
   local cfg="${1:-$(cfg_active)}"
-  local secret
-  secret=$(secret_for "${cfg}")
-  _curl_with_api_auth "${secret}" -m 2 -X PATCH \
-    -H "Content-Type: application/json" \
-    -d '{"tun":{"enable":true,"stack":"gvisor","auto-route":true,"auto-detect-interface":true,"dns-hijack":["any:53"]}}' \
-    "${API}/configs" >/dev/null 2>&1 || return 1
-  return 0
+  local running_cfg="${2:-}"
+  local secret code seen=""
+  local -a secrets=()
+  if [[ -n "${running_cfg}" ]]; then
+    secrets+=("$(secret_for "${running_cfg}")")
+  fi
+  secrets+=("$(secret_for "${cfg}")")
+  for secret in "${secrets[@]}"; do
+    [[ "${secret}" == "${seen}" ]] && continue
+    seen="${secret}"
+    if _curl_with_api_auth "${secret}" -m 2 -X PATCH \
+      -H "Content-Type: application/json" \
+      -d '{"tun":{"enable":true,"stack":"gvisor","auto-route":true,"auto-detect-interface":true,"dns-hijack":["any:53"]}}' \
+      "${API}/configs" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 load_config_api() {
   local cfg="$1"
+  local running_cfg="${2:-}"
   local path="${DATA_DIR}/${cfg}"
-  local secret code
-  secret=$(secret_for "${cfg}")
-  code=$(_curl_with_api_auth "${secret}" -m 8 -o /dev/null -w '%{http_code}' -X PUT \
-    -H "Content-Type: application/json" \
-    -d "{\"path\":\"${path}\"}" \
-    "${API}/configs?force=true" 2>/dev/null) || return 1
-  [[ "${code}" == "200" || "${code}" == "204" ]] || return 1
-  cfg_set_active "${cfg}"
-  return 0
+  local secret code seen=""
+  local -a secrets=()
+  local timeout="${MIHOMO_LOAD_CFG_TIMEOUT:-30}"
+  if [[ -n "${running_cfg}" ]]; then
+    secrets+=("$(secret_for "${running_cfg}")")
+  fi
+  secrets+=("$(secret_for "${cfg}")")
+  for secret in "${secrets[@]}"; do
+    [[ "${secret}" == "${seen}" ]] && continue
+    seen="${secret}"
+    code=$(_curl_with_api_auth "${secret}" -m "${timeout}" -o /dev/null -w '%{http_code}' -X PUT \
+      -H "Content-Type: application/json" \
+      -d "{\"path\":\"${path}\"}" \
+      "${API}/configs?force=true" 2>/dev/null) || continue
+    if [[ "${code}" == "200" || "${code}" == "204" ]]; then
+      cfg_set_active "${cfg}"
+      return 0
+    fi
+  done
+  return 1
 }
 
 reload_config_restart() {
@@ -223,7 +246,7 @@ cmd_switch_config() {
   next=$(cfg_next "${current}")
   stem=$(cfg_stem "${next}")
 
-  if ! load_config_api "${next}"; then
+  if ! load_config_api "${next}" "$(cfg_running)"; then
     reload_config_restart "${next}" || {
       echo "切换配置失败" >&2
       exit 1
@@ -255,21 +278,23 @@ cmd_set_config() {
     exit 1
   fi
 
-  cfg_set_active "${name}"
-
   if ! is_running; then
+    cfg_set_active "${name}"
     echo "已设为当前配置: $(cfg_stem "${name}") （核心未运行时可再点 TUN 或 ⌃⌥⌘ M）"
     return 0
   fi
 
-  if ! load_config_api "${name}"; then
+  local running_cfg
+  running_cfg=$(cfg_running)
+
+  if ! load_config_api "${name}" "${running_cfg}"; then
     reload_config_restart "${name}" || {
       echo "切换配置失败" >&2
       exit 1
     }
   fi
 
-  if ! api_tun_enable "${name}"; then
+  if ! api_tun_enable "${name}" "${running_cfg}"; then
     local secret
     secret=$(secret_for "${name}")
     _curl_with_api_auth "${secret}" -m 2 -X PATCH \

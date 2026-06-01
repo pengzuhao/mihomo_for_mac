@@ -151,3 +151,20 @@ is_mihomo_core_running() {
     END { exit !found }
   '
 }
+
+# 从 ps 读出当前核心 -f 指向的 yaml 基名（热切换后命令行不变，仍以进程为准鉴权）
+cfg_running() {
+  local bin="${DATA_DIR}/mihomo"
+  local dd="${DATA_DIR}"
+  ps axww -o args= 2>/dev/null | awk -v b="$bin" -v d="$dd" '
+    index($0, b) && index($0, " -f ") && index($0, " -d ") && index($0, d) {
+      i = index($0, " -f ")
+      rest = substr($0, i + 4)
+      split(rest, a, " ")
+      n = a[1]
+      sub(".*/", "", n)
+      print n
+      exit
+    }
+  '
+}

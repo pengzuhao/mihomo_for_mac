@@ -41,6 +41,8 @@ local hotkeySyncTimer = nil
 -- 关闭/ off 时递增，用于取消「quiet on」轮询；避免 hs.task 回调丢失时永远没有提示
 local feedSeq = 0
 local openUserAlerted = {}
+-- 关闭后点订阅：set-config 成功后链式 on，期间勿弹「仅写入 .active-config」
+local setConfigChainOn = false
 
 local applyState, showBar, hideBar, refresh, runControl, globalToggle, hideAndStop, switchConfig, updateConfigHotkey
 
@@ -158,11 +160,30 @@ local function startHotkeySyncTimer()
   hotkeySyncTimer = hs.timer.doEvery(8, updateConfigHotkey)
 end
 
+local function pickAlertMsg(msg)
+  if not msg or msg == "" then
+    return msg
+  end
+  local lastOk = nil
+  for line in msg:gmatch("[^\r\n]+") do
+    if line:find("已切换") or line:find("已切至") or line:find("已开启") or line:find("已设为当前") then
+      lastOk = line
+    end
+  end
+  if lastOk then
+    return lastOk
+  end
+  if msg:find("已停止") and msg:find("已启动") then
+    return "配置已切换（已重启核心）"
+  end
+  return msg:match("[^\r\n]+") or msg
+end
+
 local function alertUser(msg)
   if not msg or msg == "" then
     return
   end
-  local text = msg:match("[^\n]+") or msg
+  local text = pickAlertMsg(msg)
   -- menubar 更新同一时刻弹窗易被吞；略延时。勿用 pcall(hs.alert.show,...) 会错传 self
   hs.timer.doAfter(0.12, function()
     local ok, err = pcall(function()
@@ -442,7 +463,7 @@ local function menuForState(raw)
         busy = false
         busyGen = 0
         local gen = opGen
-        runControl("set-config", function()
+        local function finishConfigSwitch()
           uiLockUntil = hs.timer.secondsSinceEpoch() + 3
           if bar then
             local okS, stLine = pcall(status)
@@ -454,7 +475,22 @@ local function menuForState(raw)
             end
           end
           updateConfigHotkey()
-        end, nil, gen, true, capFname)
+        end
+        local modeNow = select(1, parseStatus(effectiveStatus()))
+        if modeNow == "off" then
+          local pref = peekActiveConfigBasename()
+          if pref ~= "" and pref == capFname then
+            runControl("on", finishConfigSwitch, "tun", gen, true)
+          else
+            setConfigChainOn = true
+            runControl("set-config", function()
+              setConfigChainOn = false
+              runControl("on", finishConfigSwitch, "tun", gen, true)
+            end, nil, gen, true, capFname)
+          end
+        else
+          runControl("set-config", finishConfigSwitch, nil, gen, true, capFname)
+        end
       end,
     })
   end
@@ -647,6 +683,7 @@ local function runControlDispatchCompletion(cmd, after, quiet, quietOn, feedSnap
   local ec = tonumber(exitCode) or 0
   if (cmd == "on" or cmd == "set-config") and ec ~= 0 then
     invalidateOpenFeedback()
+    setConfigChainOn = false
     if msg ~= "" then
       alertUser(msg)
     elseif cmd == "on" then
@@ -673,6 +710,7 @@ local function runControlDispatchCompletion(cmd, after, quiet, quietOn, feedSnap
   end
   if isErrorMsg(msg) then
     invalidateOpenFeedback()
+    setConfigChainOn = false
     alertUser(msg)
     uiLockUntil = 0
     if bar then
@@ -689,7 +727,7 @@ local function runControlDispatchCompletion(cmd, after, quiet, quietOn, feedSnap
     end
     updateConfigHotkey()
   elseif after then
-    if msg ~= "" and not (quiet and cmd == "off") then
+    if msg ~= "" and not (quiet and cmd == "off") and not (cmd == "set-config" and setConfigChainOn) then
       alertUser(msg)
     elseif cmd == "switch-config" then
       local st = status()
